@@ -3,7 +3,7 @@ import torch
 from torch.nn import functional as F
 
 from detectron2.layers import cat
-from detectron2.structures import Boxes
+from detectron2.structures import Boxes, cat_boxes
 
 
 """
@@ -162,7 +162,7 @@ def point_sample_fine_grained_features(features_list, feature_scales, boxes, poi
         point_coords_wrt_image (Tensor): A tensor of shape (R, P, 2) that contains image-level
             coordinates of P points.
     """
-    cat_boxes = Boxes.cat(boxes)
+    cat_boxes = cat_boxes(boxes)
     num_boxes = [len(b) for b in boxes]
 
     point_coords_wrt_image = get_point_coords_wrt_image(cat_boxes.tensor, point_coords)

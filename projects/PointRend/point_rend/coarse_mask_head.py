@@ -46,12 +46,12 @@ class CoarseMaskHead(nn.Module):
                 stride=1,
                 padding=0,
                 bias=True,
-                activation=F.relu,
+                activation=torch.nn.ReLU(),
             )
             self.conv_layers.append(self.reduce_channel_dim_conv)
 
         self.reduce_spatial_dim_conv = Conv2d(
-            conv_dim, conv_dim, kernel_size=2, stride=2, padding=0, bias=True, activation=F.relu
+            conv_dim, conv_dim, kernel_size=2, stride=2, padding=0, bias=True, activation=torch.nn.ReLU()
         )
         self.conv_layers.append(self.reduce_spatial_dim_conv)
 

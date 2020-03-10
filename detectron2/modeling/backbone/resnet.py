@@ -345,7 +345,8 @@ class ResNet(Backbone):
         self._out_feature_strides = {"stem": current_stride}
         self._out_feature_channels = {"stem": self.stem.out_channels}
 
-        self.stages_and_names = []
+        self.stages = nn.ModuleList()
+        self.stage_names = []
         for i, blocks in enumerate(stages):
             for block in blocks:
                 assert isinstance(block, ResNetBlockBase), block
@@ -353,7 +354,8 @@ class ResNet(Backbone):
             stage = nn.Sequential(*blocks)
             name = "res" + str(i + 2)
             self.add_module(name, stage)
-            self.stages_and_names.append((stage, name))
+            self.stage_names.append(name)
+            self.stages.append(stage)
             self._out_feature_strides[name] = current_stride = int(
                 current_stride * np.prod([k.stride for k in blocks])
             )
@@ -382,7 +384,8 @@ class ResNet(Backbone):
         x = self.stem(x)
         if "stem" in self._out_features:
             outputs["stem"] = x
-        for stage, name in self.stages_and_names:
+        for i, stage in enumerate(self.stages):
+            name = self.stage_names[i]
             x = stage(x)
             if name in self._out_features:
                 outputs[name] = x

@@ -5,7 +5,19 @@ import torch
 from torch.nn import functional as F
 
 
-class ImageList(object):
+@torch.jit.script
+class ImageListJitInterface(object):
+    def __init__(self, tensor: torch.Tensor, image_sizes: List[Tuple[int, int]]):
+        """
+        Arguments:
+            tensor (Tensor): of shape (N, H, W) or (N, C_1, ..., C_K, H, W) where K >= 1
+            image_sizes (list[tuple[int, int]]): Each tuple is (h, w).
+        """
+        self.tensor = tensor
+        self.image_sizes = image_sizes
+
+
+class ImageList(ImageListJitInterface):
     """
     Structure that holds a list of images (of possibly
     varying sizes) as a single tensor.
@@ -15,15 +27,6 @@ class ImageList(object):
     Attributes:
         image_sizes (list[tuple[int, int]]): each tuple is (h, w)
     """
-
-    def __init__(self, tensor: torch.Tensor, image_sizes: List[Tuple[int, int]]):
-        """
-        Arguments:
-            tensor (Tensor): of shape (N, H, W) or (N, C_1, ..., C_K, H, W) where K >= 1
-            image_sizes (list[tuple[int, int]]): Each tuple is (h, w).
-        """
-        self.tensor = tensor
-        self.image_sizes = image_sizes
 
     def __len__(self) -> int:
         return len(self.image_sizes)

@@ -1,6 +1,6 @@
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
 import math
-from typing import Iterator, List, Union
+from typing import Iterator, List, Union, Tuple
 import torch
 
 from detectron2.layers import cat
@@ -248,7 +248,7 @@ class RotatedBoxes(Boxes):
         """
         self.tensor[:, 4] = (self.tensor[:, 4] + 180.0) % 360.0 - 180.0
 
-    def clip(self, box_size: Boxes.BoxSizeType, clip_angle_threshold: float = 1.0) -> None:
+    def clip(self, box_size: Tuple[int, int], clip_angle_threshold: float = 1.0) -> None:
         """
         Clip (in place) the boxes by limiting x coordinates to the range [0, width]
         and y coordinates to the range [0, height].
@@ -342,7 +342,7 @@ class RotatedBoxes(Boxes):
     def __repr__(self) -> str:
         return "RotatedBoxes(" + str(self.tensor) + ")"
 
-    def inside_box(self, box_size: Boxes.BoxSizeType, boundary_threshold: int = 0) -> torch.Tensor:
+    def inside_box(self, box_size: Tuple[int, int], boundary_threshold: int = 0) -> torch.Tensor:
         """
         Args:
             box_size (height, width): Size of the reference box covering

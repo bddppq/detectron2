@@ -38,11 +38,13 @@ class DensePoseDeepLabHead(nn.Module):
         self.ASPP = ASPP(input_channels, [6, 12, 56], n_channels)  # 6, 12, 56
         self.add_module("ASPP", self.ASPP)
 
+        self.NLBlock = None
         if self.use_nonlocal:
             self.NLBlock = NONLocalBlock2D(input_channels, bn_layer=True)
             self.add_module("NLBlock", self.NLBlock)
         # weight_init.c2_msra_fill(self.ASPP)
 
+        self.body_conv_fcns = torch.nn.ModuleList()
         for i in range(self.n_stacked_convs):
             norm_module = nn.GroupNorm(32, hidden_dim) if norm == "GN" else None
             layer = Conv2d(
@@ -56,27 +58,21 @@ class DensePoseDeepLabHead(nn.Module):
             )
             weight_init.c2_msra_fill(layer)
             n_channels = hidden_dim
-            layer_name = self._get_layer_name(i)
-            self.add_module(layer_name, layer)
+            self.body_conv_fcns.append(layer)
         self.n_out_channels = hidden_dim
         # initialize_module_params(self)
 
     def forward(self, features):
         x0 = features
         x = self.ASPP(x0)
-        if self.use_nonlocal:
+        if self.NLBlock is not None:
             x = self.NLBlock(x)
         output = x
-        for i in range(self.n_stacked_convs):
-            layer_name = self._get_layer_name(i)
-            x = getattr(self, layer_name)(x)
+        for conv in self.body_conv_fcns:
+            x = conv(x)
             x = F.relu(x)
             output = x
         return output
-
-    def _get_layer_name(self, i):
-        layer_name = "body_conv_fcn{}".format(i + 1)
-        return layer_name
 
 
 # Copied from
@@ -94,9 +90,10 @@ class ASPPConv(nn.Sequential):
         super(ASPPConv, self).__init__(*modules)
 
 
-class ASPPPooling(nn.Sequential):
+class ASPPPooling(nn.Module):
     def __init__(self, in_channels, out_channels):
-        super(ASPPPooling, self).__init__(
+        super().__init__()
+        self.layers = nn.Sequential(
             nn.AdaptiveAvgPool2d(1),
             nn.Conv2d(in_channels, out_channels, 1, bias=False),
             nn.GroupNorm(32, out_channels),
@@ -105,7 +102,7 @@ class ASPPPooling(nn.Sequential):
 
     def forward(self, x):
         size = x.shape[-2:]
-        x = super(ASPPPooling, self).forward(x)
+        x = self.layers(x)
         return F.interpolate(x, size=size, mode="bilinear", align_corners=False)
 
 
@@ -278,10 +275,11 @@ class DensePoseV1ConvXHead(nn.Module):
         # fmt: on
         pad_size = kernel_size // 2
         n_channels = input_channels
+
+        self.body_conv_fcns = torch.nn.ModuleList()
         for i in range(self.n_stacked_convs):
             layer = Conv2d(n_channels, hidden_dim, kernel_size, stride=1, padding=pad_size)
-            layer_name = self._get_layer_name(i)
-            self.add_module(layer_name, layer)
+            self.body_conv_fcns.append(layer)
             n_channels = hidden_dim
         self.n_out_channels = n_channels
         initialize_module_params(self)
@@ -289,16 +287,11 @@ class DensePoseV1ConvXHead(nn.Module):
     def forward(self, features):
         x = features
         output = x
-        for i in range(self.n_stacked_convs):
-            layer_name = self._get_layer_name(i)
-            x = getattr(self, layer_name)(x)
+        for conv in self.body_conv_fcns:
+            x = conv(x)
             x = F.relu(x)
             output = x
         return output
-
-    def _get_layer_name(self, i):
-        layer_name = "body_conv_fcn{}".format(i + 1)
-        return layer_name
 
 
 class DensePosePredictor(nn.Module):
@@ -330,18 +323,18 @@ class DensePosePredictor(nn.Module):
         u_lowres = self.u_lowres(head_outputs)
         v_lowres = self.v_lowres(head_outputs)
 
-        def interp2d(input):
-            return interpolate(
-                input, scale_factor=self.scale_factor, mode="bilinear", align_corners=False
-            )
-
-        ann_index = interp2d(ann_index_lowres)
-        index_uv = interp2d(index_uv_lowres)
-        u = interp2d(u_lowres)
-        v = interp2d(v_lowres)
+        ann_index = self._interp2d(ann_index_lowres)
+        index_uv = self._interp2d(index_uv_lowres)
+        u = self._interp2d(u_lowres)
+        v = self._interp2d(v_lowres)
         return (
             (ann_index, index_uv, u, v),
             (ann_index_lowres, index_uv_lowres, u_lowres, v_lowres),
+        )
+
+    def _interp2d(self, input):
+        return interpolate(
+            input, scale_factor=[float(self.scale_factor)], mode="bilinear", align_corners=False
         )
 
 

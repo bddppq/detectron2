@@ -40,7 +40,7 @@ class BufferList(nn.Module):
         return iter(self._buffers.values())
 
 
-def _create_grid_offsets(size, stride, offset, device):
+def _create_grid_offsets(size: List[int], stride: int, offset: float, device: torch.device):
     grid_height, grid_width = size
     shifts_x = torch.arange(
         offset * stride, grid_width * stride, step=stride, dtype=torch.float32, device=device
@@ -53,6 +53,12 @@ def _create_grid_offsets(size, stride, offset, device):
     shift_x = shift_x.reshape(-1)
     shift_y = shift_y.reshape(-1)
     return shift_x, shift_y
+
+
+class TensorWrapper(torch.nn.Module):
+    def __init__(self, tensor):
+        super().__init__()
+        self.tensor = tensor
 
 
 @ANCHOR_GENERATOR_REGISTRY.register()
@@ -86,7 +92,7 @@ class DefaultAnchorGenerator(nn.Module):
         """
 
         self.num_features = len(self.strides)
-        self.cell_anchors = self._calculate_anchors(sizes, aspect_ratios)
+        self.cell_anchors = torch.nn.ModuleList([TensorWrapper(tensor) for tensor in self._calculate_anchors(sizes, aspect_ratios)])
 
     def _calculate_anchors(self, sizes, aspect_ratios):
         # If one size (or aspect ratio) is specified and there are multiple feature
@@ -125,11 +131,15 @@ class DefaultAnchorGenerator(nn.Module):
 
                 In standard RPN models, `num_cell_anchors` on every feature map is the same.
         """
-        return [len(cell_anchors) for cell_anchors in self.cell_anchors]
+        return [len(cell_anchors.tensor) for cell_anchors in self.cell_anchors]
 
-    def grid_anchors(self, grid_sizes):
+    def grid_anchors(self, grid_sizes: List[List[int]]):
         anchors = []
-        for size, stride, base_anchors in zip(grid_sizes, self.strides, self.cell_anchors):
+        for i, base_anchors_wrapper in enumerate(self.cell_anchors):
+            size = grid_sizes[i]
+            stride = self.strides[i]
+            base_anchors = base_anchors_wrapper.tensor
+
             shift_x, shift_y = _create_grid_offsets(size, stride, self.offset, base_anchors.device)
             shifts = torch.stack((shift_x, shift_y, shift_x, shift_y), dim=1)
 
@@ -176,7 +186,7 @@ class DefaultAnchorGenerator(nn.Module):
                 anchors.append([x0, y0, x1, y1])
         return torch.tensor(anchors)
 
-    def forward(self, features):
+    def forward(self, features: List[torch.Tensor]):
         """
         Args:
             features (list[Tensor]): list of backbone feature maps on which to generate anchors.
@@ -189,12 +199,13 @@ class DefaultAnchorGenerator(nn.Module):
         grid_sizes = [feature_map.shape[-2:] for feature_map in features]
         anchors_over_all_feature_maps = self.grid_anchors(grid_sizes)
 
-        anchors_in_image = []
-        for anchors_per_feature_map in anchors_over_all_feature_maps:
-            boxes = Boxes(anchors_per_feature_map)
-            anchors_in_image.append(boxes)
-
-        anchors = [copy.deepcopy(anchors_in_image) for _ in range(num_images)]
+        anchors: List[List[Boxes]] = []
+        for _ in range(num_images):
+            anchors_in_image: List[Boxes] = []
+            for anchors_per_feature_map in anchors_over_all_feature_maps:
+                boxes = Boxes(anchors_per_feature_map)
+                anchors_in_image.append(boxes)
+            anchors.append(anchors_in_image)
         return anchors
 
 

@@ -3,6 +3,7 @@ from typing import List
 import torch
 
 
+@torch.jit.script
 class Matcher(object):
     """
     This class assigns to each predicted "element" (e.g., a box) a ground-truth
@@ -48,8 +49,9 @@ class Matcher(object):
         assert thresholds[0] > 0
         thresholds.insert(0, -float("inf"))
         thresholds.append(float("inf"))
-        assert all(low <= high for (low, high) in zip(thresholds[:-1], thresholds[1:]))
-        assert all(l in [-1, 0, 1] for l in labels)
+        if not torch.jit.is_scripting():
+            assert all([low <= high for (low, high) in zip(thresholds[:-1], thresholds[1:])])
+            assert all([l in [-1, 0, 1] for l in labels])
         assert len(labels) == len(thresholds) - 1
         self.thresholds = thresholds
         self.labels = labels
@@ -92,7 +94,7 @@ class Matcher(object):
 
         for (l, low, high) in zip(self.labels, self.thresholds[:-1], self.thresholds[1:]):
             low_high = (matched_vals >= low) & (matched_vals < high)
-            match_labels[low_high] = l
+            match_labels[low_high] = torch.tensor([l])
 
         if self.allow_low_quality_matches:
             self.set_low_quality_matches_(match_labels, match_quality_matrix)
@@ -132,4 +134,4 @@ class Matcher(object):
         # Note how gt items 1, 2, 3, and 5 each have two ties
 
         pred_inds_to_update = gt_pred_pairs_of_highest_quality[:, 1]
-        match_labels[pred_inds_to_update] = 1
+        match_labels[pred_inds_to_update] = torch.tensor([1])

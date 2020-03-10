@@ -1,11 +1,12 @@
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
-from typing import Dict, List
+from typing import Dict, List, Optional
 import torch
 import torch.nn.functional as F
 from torch import nn
 
 from detectron2.layers import ShapeSpec
 from detectron2.utils.registry import Registry
+from detectron2.structures import ImageListJitInterface, Boxes, JittableInstances
 
 from ..anchor_generator import build_anchor_generator
 from ..box_regression import Box2BoxTransform
@@ -71,7 +72,7 @@ class StandardRPNHead(nn.Module):
             nn.init.normal_(l.weight, std=0.01)
             nn.init.constant_(l.bias, 0)
 
-    def forward(self, features):
+    def forward(self, features: List[torch.Tensor]):
         """
         Args:
             features (list[Tensor]): list of feature maps
@@ -106,12 +107,12 @@ class RPN(nn.Module):
 
         # Map from self.training state to train/test settings
         self.pre_nms_topk = {
-            True: cfg.MODEL.RPN.PRE_NMS_TOPK_TRAIN,
-            False: cfg.MODEL.RPN.PRE_NMS_TOPK_TEST,
+            1: cfg.MODEL.RPN.PRE_NMS_TOPK_TRAIN,
+            0: cfg.MODEL.RPN.PRE_NMS_TOPK_TEST,
         }
         self.post_nms_topk = {
-            True: cfg.MODEL.RPN.POST_NMS_TOPK_TRAIN,
-            False: cfg.MODEL.RPN.POST_NMS_TOPK_TEST,
+            1: cfg.MODEL.RPN.POST_NMS_TOPK_TRAIN,
+            0: cfg.MODEL.RPN.POST_NMS_TOPK_TEST,
         }
         self.boundary_threshold = cfg.MODEL.RPN.BOUNDARY_THRESH
 
@@ -124,7 +125,7 @@ class RPN(nn.Module):
         )
         self.rpn_head = build_rpn_head(cfg, [input_shape[f] for f in self.in_features])
 
-    def forward(self, images, features, gt_instances=None):
+    def forward(self, images: ImageListJitInterface, features: Dict[str, torch.Tensor], gt_instances: Optional[List[JittableInstances]]=None):
         """
         Args:
             images (ImageList): input images of length `N`
@@ -140,7 +141,9 @@ class RPN(nn.Module):
             loss: dict[Tensor] or None
         """
         gt_boxes = [x.gt_boxes for x in gt_instances] if gt_instances is not None else None
-        del gt_instances
+        gt_boxes: List[Boxes] = []
+        if not torch.jit.is_scripting():
+            del gt_instances
         features = [features[f] for f in self.in_features]
         pred_objectness_logits, pred_anchor_deltas = self.rpn_head(features)
         anchors = self.anchor_generator(features)
@@ -160,26 +163,26 @@ class RPN(nn.Module):
             self.smooth_l1_beta,
         )
 
+        losses = {}
         if self.training:
-            losses = {k: v * self.loss_weight for k, v in outputs.losses().items()}
-        else:
-            losses = {}
+            for k, v in outputs.losses().items():
+                losses[k] = v * self.loss_weight
 
-        with torch.no_grad():
-            # Find the top proposals by applying NMS and removing boxes that
-            # are too small. The proposals are treated as fixed for approximate
-            # joint training with roi heads. This approach ignores the derivative
-            # w.r.t. the proposal boxes’ coordinates that are also network
-            # responses, so is approximate.
-            proposals = find_top_rpn_proposals(
-                outputs.predict_proposals(),
-                outputs.predict_objectness_logits(),
-                images,
-                self.nms_thresh,
-                self.pre_nms_topk[self.training],
-                self.post_nms_topk[self.training],
-                self.min_box_side_len,
-                self.training,
-            )
-
+        # torch.set_grad_enabled(False)
+        # Find the top proposals by applying NMS and removing boxes that
+        # are too small. The proposals are treated as fixed for approximate
+        # joint training with roi heads. This approach ignores the derivative
+        # w.r.t. the proposal boxes’ coordinates that are also network
+        # responses, so is approximate.
+        proposals = find_top_rpn_proposals(
+            outputs.predict_proposals(),
+            outputs.predict_objectness_logits(),
+            images,
+            self.nms_thresh,
+            self.pre_nms_topk[int(self.training)],
+            self.post_nms_topk[int(self.training)],
+            self.min_box_side_len,
+            self.training,
+        )
+        # torch.set_grad_enabled(True)
         return proposals, losses

@@ -8,7 +8,7 @@ from fvcore.nn import sigmoid_focal_loss_jit, smooth_l1_loss
 from torch import nn
 
 from detectron2.layers import ShapeSpec, batched_nms, cat
-from detectron2.structures import Boxes, ImageList, Instances, pairwise_iou
+from detectron2.structures import Boxes, ImageList, Instances, pairwise_iou, cat_boxes
 from detectron2.utils.events import get_event_storage
 from detectron2.utils.logger import log_first_n
 
@@ -291,7 +291,7 @@ class RetinaNet(nn.Module):
         """
         gt_classes = []
         gt_anchors_deltas = []
-        anchors = [Boxes.cat(anchors_i) for anchors_i in anchors]
+        anchors = [cat_boxes(anchors_i) for anchors_i in anchors]
         # list[Tensor(R, 4)], one for each image
 
         for anchors_per_image, targets_per_image in zip(anchors, targets):

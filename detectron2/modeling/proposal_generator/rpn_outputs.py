@@ -1,15 +1,18 @@
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
 import itertools
 import logging
+from typing import List, Optional
 import numpy as np
 import torch
 import torch.nn.functional as F
 from fvcore.nn import smooth_l1_loss
 
 from detectron2.layers import batched_nms, cat
-from detectron2.structures import Boxes, Instances, pairwise_iou
+from detectron2.structures import Boxes, Instances, pairwise_iou, cat_boxes, ImageListJitInterface, JittableInstances
 from detectron2.utils.events import get_event_storage
 from detectron2.utils.memory import retry_if_cuda_oom
+from detectron2.modeling.matcher import Matcher
+from detectron2.modeling.box_regression import Box2BoxTransform
 
 from ..sampling import subsample_labels
 
@@ -50,14 +53,14 @@ Naming convention:
 
 
 def find_top_rpn_proposals(
-    proposals,
-    pred_objectness_logits,
-    images,
-    nms_thresh,
-    pre_nms_topk,
-    post_nms_topk,
-    min_box_side_len,
-    training,
+    proposals: List[torch.Tensor],
+    pred_objectness_logits: List[torch.Tensor],
+    images: ImageListJitInterface,
+    nms_thresh: float,
+    pre_nms_topk: int,
+    post_nms_topk: int,
+    min_box_side_len: int,
+    training: bool,
 ):
     """
     For each feature map, select the `pre_nms_topk` highest scoring proposals,
@@ -78,7 +81,7 @@ def find_top_rpn_proposals(
         post_nms_topk (int): number of top k scoring proposals to keep after applying NMS.
             When RPN is run on multiple feature maps (as in FPN) this number is total,
             over all feature maps.
-        min_box_side_len (float): minimum proposal box side length in pixels (absolute units
+        min_box_side_len (int): minimum proposal box side length in pixels (absolute units
             wrt input images).
         training (bool): True if proposals are to be used in training, otherwise False.
             This arg exists only to support a legacy bug; look for the "NB: Legacy bug ..."
@@ -98,9 +101,9 @@ def find_top_rpn_proposals(
     topk_proposals = []
     level_ids = []  # #lvl Tensor, each of shape (topk,)
     batch_idx = torch.arange(num_images, device=device)
-    for level_id, proposals_i, logits_i in zip(
-        itertools.count(), proposals, pred_objectness_logits
-    ):
+    for level_id, (proposals_i, logits_i) in enumerate(zip(
+        proposals, pred_objectness_logits
+    )):
         Hi_Wi_A = logits_i.shape[1]
         num_proposals_i = min(pre_nms_topk, Hi_Wi_A)
 
@@ -123,7 +126,7 @@ def find_top_rpn_proposals(
     level_ids = cat(level_ids, dim=0)
 
     # 3. For each image, run a per-level NMS, and choose topk results.
-    results = []
+    results: List[JittableInstances] = []
     for n, image_size in enumerate(image_sizes):
         boxes = Boxes(topk_proposals[n])
         scores_per_img = topk_scores[n]
@@ -149,19 +152,21 @@ def find_top_rpn_proposals(
         # This bug is addressed in Detectron2 to make the behavior independent of batch size.
         keep = keep[:post_nms_topk]  # keep is already sorted
 
-        res = Instances(image_size)
-        res.proposal_boxes = boxes[keep]
-        res.objectness_logits = scores_per_img[keep]
+        res = JittableInstances(
+            image_size,
+            proposal_boxes=boxes[keep],
+            objectness_logits=scores_per_img[keep],
+            gt_boxes=None)
         results.append(res)
     return results
 
 
 def rpn_losses(
-    gt_objectness_logits,
-    gt_anchor_deltas,
-    pred_objectness_logits,
-    pred_anchor_deltas,
-    smooth_l1_beta,
+    gt_objectness_logits: torch.Tensor,
+    gt_anchor_deltas: torch.Tensor,
+    pred_objectness_logits: torch.Tensor,
+    pred_anchor_deltas: torch.Tensor,
+    smooth_l1_beta: float,
 ):
     """
     Args:
@@ -198,17 +203,17 @@ def rpn_losses(
 class RPNOutputs(object):
     def __init__(
         self,
-        box2box_transform,
-        anchor_matcher,
-        batch_size_per_image,
-        positive_fraction,
-        images,
-        pred_objectness_logits,
-        pred_anchor_deltas,
-        anchors,
-        boundary_threshold=0,
-        gt_boxes=None,
-        smooth_l1_beta=0.0,
+        box2box_transform: Box2BoxTransform,
+        anchor_matcher: Matcher,
+        batch_size_per_image: int,
+        positive_fraction: float,
+        images: ImageListJitInterface,
+        pred_objectness_logits: List[torch.Tensor],
+        pred_anchor_deltas: List[torch.Tensor],
+        anchors: List[List[Boxes]],
+        boundary_threshold: int=0,
+        gt_boxes: List[Boxes]=None,
+        smooth_l1_beta: float=0.0,
     ):
         """
         Args:
@@ -247,8 +252,8 @@ class RPNOutputs(object):
         self.anchors = anchors
         self.gt_boxes = gt_boxes
         self.num_feature_maps = len(pred_objectness_logits)
-        self.num_images = len(images)
         self.image_sizes = images.image_sizes
+        self.num_images = len(self.image_sizes)
         self.boundary_threshold = boundary_threshold
         self.smooth_l1_beta = smooth_l1_beta
 
@@ -263,26 +268,32 @@ class RPNOutputs(object):
         gt_objectness_logits = []
         gt_anchor_deltas = []
         # Concatenate anchors from all feature maps into a single Boxes per image
-        anchors = [Boxes.cat(anchors_i) for anchors_i in self.anchors]
+        anchors = [cat_boxes(anchors_i) for anchors_i in self.anchors]
         for image_size_i, anchors_i, gt_boxes_i in zip(self.image_sizes, anchors, self.gt_boxes):
             """
             image_size_i: (h, w) for the i-th image
             anchors_i: anchors for i-th image
             gt_boxes_i: ground-truth boxes for i-th image
             """
-            match_quality_matrix = retry_if_cuda_oom(pairwise_iou)(gt_boxes_i, anchors_i)
-            matched_idxs, gt_objectness_logits_i = retry_if_cuda_oom(self.anchor_matcher)(
-                match_quality_matrix
-            )
+            if not torch.jit.is_scripting():
+                match_quality_matrix = retry_if_cuda_oom(pairwise_iou)(gt_boxes_i, anchors_i)
+                matched_idxs, gt_objectness_logits_i = retry_if_cuda_oom(self.anchor_matcher)(
+                    match_quality_matrix
+                )
+            else:
+                match_quality_matrix = pairwise_iou(gt_boxes_i, anchors_i)
+                matched_idxs, gt_objectness_logits_i = self.anchor_matcher(
+                    match_quality_matrix
+                )
             # Matching is memory-expensive and may result in CPU tensors. But the result is small
-            gt_objectness_logits_i = gt_objectness_logits_i.to(device=gt_boxes_i.device)
-            del match_quality_matrix
+            gt_objectness_logits_i = gt_objectness_logits_i.to(device=gt_boxes_i.tensor.device)
+            # del match_quality_matrix
 
             if self.boundary_threshold >= 0:
                 # Discard anchors that go out of the boundaries of the image
                 # NOTE: This is legacy functionality that is turned off by default in Detectron2
                 anchors_inside_image = anchors_i.inside_box(image_size_i, self.boundary_threshold)
-                gt_objectness_logits_i[~anchors_inside_image] = -1
+                gt_objectness_logits_i[~anchors_inside_image] = torch.tensor([-1])
 
             if len(gt_boxes_i) == 0:
                 # These values won't be used anyway since the anchor is labeled as background
@@ -299,6 +310,21 @@ class RPNOutputs(object):
 
         return gt_objectness_logits, gt_anchor_deltas
 
+    def _resample(self, label):
+        """
+        Randomly sample a subset of positive and negative examples by overwriting
+        the label vector to the ignore value (-1) for all elements that are not
+        included in the sample.
+        """
+        pos_idx, neg_idx = subsample_labels(
+            label, self.batch_size_per_image, self.positive_fraction, 0
+        )
+        # Fill with the ignore label (-1), then set positive and negative labels
+        label.fill_(-1)
+        label.scatter_(0, pos_idx, 1)
+        label.scatter_(0, neg_idx, 0)
+        return label
+
     def losses(self):
         """
         Return the losses from a set of RPN predictions and their associated ground-truth.
@@ -309,21 +335,6 @@ class RPNOutputs(object):
                 `loss_rpn_loc` for proposal localization.
         """
 
-        def resample(label):
-            """
-            Randomly sample a subset of positive and negative examples by overwriting
-            the label vector to the ignore value (-1) for all elements that are not
-            included in the sample.
-            """
-            pos_idx, neg_idx = subsample_labels(
-                label, self.batch_size_per_image, self.positive_fraction, 0
-            )
-            # Fill with the ignore label (-1), then set positive and negative labels
-            label.fill_(-1)
-            label.scatter_(0, pos_idx, 1)
-            label.scatter_(0, neg_idx, 0)
-            return label
-
         gt_objectness_logits, gt_anchor_deltas = self._get_ground_truth()
         """
         gt_objectness_logits: list of N tensors. Tensor i is a vector whose length is the
@@ -333,20 +344,22 @@ class RPNOutputs(object):
         """
         # Collect all objectness labels and delta targets over feature maps and images
         # The final ordering is L, N, H, W, A from slowest to fastest axis.
-        num_anchors_per_map = [np.prod(x.shape[1:]) for x in self.pred_objectness_logits]
-        num_anchors_per_image = sum(num_anchors_per_map)
+        num_anchors_per_map: List[int] = [torch.prod(torch.tensor(x.shape[1:])).item() for x in self.pred_objectness_logits]
+        num_anchors_per_image = torch.sum(torch.tensor(num_anchors_per_map))
 
         # Stack to: (N, num_anchors_per_image)
         gt_objectness_logits = torch.stack(
-            [resample(label) for label in gt_objectness_logits], dim=0
+            [self._resample(label) for label in gt_objectness_logits], dim=0
         )
 
         # Log the number of positive/negative anchors per-image that's used in training
         num_pos_anchors = (gt_objectness_logits == 1).sum().item()
         num_neg_anchors = (gt_objectness_logits == 0).sum().item()
-        storage = get_event_storage()
-        storage.put_scalar("rpn/num_pos_anchors", num_pos_anchors / self.num_images)
-        storage.put_scalar("rpn/num_neg_anchors", num_neg_anchors / self.num_images)
+
+        if not torch.jit.is_scripting():
+            storage = get_event_storage()
+            storage.put_scalar("rpn/num_pos_anchors", num_pos_anchors / self.num_images)
+            storage.put_scalar("rpn/num_neg_anchors", num_neg_anchors / self.num_images)
 
         assert gt_objectness_logits.shape[1] == num_anchors_per_image
         # Split to tuple of L tensors, each with shape (N, num_anchors_per_map)
@@ -411,7 +424,12 @@ class RPNOutputs(object):
         """
         proposals = []
         # Transpose anchors from images-by-feature-maps (N, L) to feature-maps-by-images (L, N)
-        anchors = list(zip(*self.anchors))
+        anchors: List[List[Boxes]] = []
+        for i in range(self.num_feature_maps):
+            anchors_i: List[Boxes] = []
+            for boxes_list in self.anchors:
+                anchors_i.append(boxes_list[i])
+            anchors.append(anchors_i)
         # For each feature map
         for anchors_i, pred_anchor_deltas_i in zip(anchors, self.pred_anchor_deltas):
             B = anchors_i[0].tensor.size(1)
@@ -422,7 +440,7 @@ class RPNOutputs(object):
             )
             # Concatenate all anchors to shape (N*Hi*Wi*A, B)
             # type(anchors_i[0]) is Boxes (B = 4) or RotatedBoxes (B = 5)
-            anchors_i = type(anchors_i[0]).cat(anchors_i)
+            anchors_i = cat_boxes(anchors_i)
             proposals_i = self.box2box_transform.apply_deltas(
                 pred_anchor_deltas_i, anchors_i.tensor
             )

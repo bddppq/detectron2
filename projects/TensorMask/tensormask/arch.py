@@ -17,7 +17,7 @@ from detectron2.modeling.meta_arch.retinanet import (
     permute_all_cls_and_box_to_N_HWA_K_and_concat,
     permute_to_N_HWA_K,
 )
-from detectron2.structures import Boxes, ImageList, Instances
+from detectron2.structures import Boxes, ImageList, Instances, cat_boxes
 from detectron2.utils.logger import log_first_n
 
 from tensormask.layers import SwapAlign2Nat
@@ -536,7 +536,7 @@ class TensorMask(nn.Module):
         gt_masks = [[[] for _ in range(self.num_anchors)] for _ in range(self.num_levels)]
         gt_mask_inds = [[[] for _ in range(self.num_anchors)] for _ in range(self.num_levels)]
 
-        anchors = [Boxes.cat(anchors_i) for anchors_i in anchors]
+        anchors = [cat_boxes(anchors_i) for anchors_i in anchors]
         unit_lengths = [cat(unit_lengths_i) for unit_lengths_i in unit_lengths]
         indexes = [cat(indexes_i) for indexes_i in indexes]
 
@@ -656,7 +656,7 @@ class TensorMask(nn.Module):
                 logits_im,
                 deltas_im,
                 masks_im,
-                Boxes.cat(anchors_im),
+                cat_boxes(anchors_im),
                 cat(indexes_im),
                 tuple(image_size),
             )

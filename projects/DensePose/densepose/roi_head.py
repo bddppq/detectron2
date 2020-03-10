@@ -42,7 +42,7 @@ class Decoder(nn.Module):
         norm                  = cfg.MODEL.ROI_DENSEPOSE_HEAD.DECODER_NORM
         # fmt: on
 
-        self.scale_heads = []
+        self.scale_heads = torch.nn.ModuleList()
         for in_feature in self.in_features:
             head_ops = []
             head_length = max(
@@ -57,7 +57,7 @@ class Decoder(nn.Module):
                     padding=1,
                     bias=not norm,
                     norm=get_norm(norm, conv_dims),
-                    activation=F.relu,
+                    activation=torch.nn.ReLU(),
                 )
                 weight_init.c2_msra_fill(conv)
                 head_ops.append(conv)
@@ -71,11 +71,9 @@ class Decoder(nn.Module):
         weight_init.c2_msra_fill(self.predictor)
 
     def forward(self, features):
-        for i, _ in enumerate(self.in_features):
-            if i == 0:
-                x = self.scale_heads[i](features[i])
-            else:
-                x = x + self.scale_heads[i](features[i])
+        x = torch.sum(torch.stack([
+            head(features[i]) for i, head in enumerate(self.scale_heads)
+        ]))
         x = self.predictor(x)
         return x
 

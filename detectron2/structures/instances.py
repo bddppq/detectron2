@@ -1,12 +1,34 @@
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
 import itertools
-from typing import Any, Dict, List, Tuple, Union
+from typing import Any, Dict, List, Tuple, Union, Optional
 import torch
 
 from detectron2.layers import cat
+from detectron2.structures import Boxes
 
 
-class Instances:
+@torch.jit.script
+class JittableInstances:
+    def __init__(self,
+                 image_size: Tuple[int, int],
+                 gt_boxes: Optional[List[Boxes]]=None,
+                 proposal_boxes: Optional[Boxes]=None,
+                 objectness_logits: Optional[torch.Tensor]=None):
+        self._image_size = image_size
+        self.gt_boxes = gt_boxes
+        self.proposal_boxes = proposal_boxes
+        self.objectness_logits = objectness_logits
+
+    @property
+    def image_size(self) -> Tuple[int, int]:
+        """
+        Returns:
+            tuple: height, width
+        """
+        return self._image_size
+
+
+class Instances(JittableInstances):
     """
     This class represents a list of instances in an image.
     It stores the attributes of instances (e.g., boxes, masks, labels, scores) as "fields".
@@ -38,18 +60,15 @@ class Instances:
             image_size (height, width): the spatial size of the image.
             kwargs: fields to add to this `Instances`.
         """
-        self._image_size = image_size
+        super().__init__(
+            image_size,
+            gt_boxes=kwargs.pop('gt_boxes', None),
+            proposal_boxes=kwargs.pop('proposal_boxes', None),
+            objectness_logits=kwargs.pop('objectness_logits', None),
+        )
         self._fields: Dict[str, Any] = {}
         for k, v in kwargs.items():
             self.set(k, v)
-
-    @property
-    def image_size(self) -> Tuple[int, int]:
-        """
-        Returns:
-            tuple: height, width
-        """
-        return self._image_size
 
     def __setattr__(self, name: str, val: Any) -> None:
         if name.startswith("_"):

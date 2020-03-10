@@ -214,7 +214,7 @@ class MaskRCNNConvUpsampleHead(BaseMaskRCNNHead):
                 padding=1,
                 bias=not self.norm,
                 norm=get_norm(self.norm, conv_dims),
-                activation=F.relu,
+                activation=torch.nn.ReLU(),
             )
             self.add_module("mask_fcn{}".format(k + 1), conv)
             self.conv_norm_relus.append(conv)
